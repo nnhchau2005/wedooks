@@ -1,30 +1,21 @@
 <?php
 /**
- * order_api.php – Nhận đơn từ checkout.php và lưu vào SQL.
+ * order_api.php – Nhận đơn từ checkout.php và lưu vào SQL. BẮT BUỘC đã đăng nhập.
  *
- *   POST { name, phone, email, province, district, ward, street, note, payment }
+ *   POST { name, phone, province, district, ward, street, note, payment }
  *   → { ok:true, order_id, subtotal, shipping, total, payment_method, payment_status }
- *   → { ok:false, error, fields? }   (fields = danh sách ô nhập bị sai)
+ *   → { ok:false, error, fields?, login? }   (fields = ô nhập bị sai, login = cần đăng nhập)
  *
- * Số tiền KHÔNG lấy từ trình duyệt – server tự tính lại từ CartItems + Products.
+ * Email lấy từ tài khoản đang đăng nhập. Số tiền KHÔNG lấy từ trình duyệt –
+ * server tự tính lại từ CartItems + Products.
  */
 require __DIR__ . '/db.php';
 
-header('Content-Type: application/json; charset=utf-8');
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') json_out(['ok' => false, 'error' => 'Chỉ nhận POST.'], 405);
+require_fetch();
 
-function json_out(array $data, int $status = 200): void
-{
-    http_response_code($status);
-    echo json_encode($data, JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    json_out(['ok' => false, 'error' => 'Chỉ nhận POST.'], 405);
-}
-if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'fetch') {
-    json_out(['ok' => false, 'error' => 'Yêu cầu không hợp lệ.'], 403);
-}
+$user = current_user();
+if (!$user) json_out(['ok' => false, 'error' => 'Vui lòng đăng nhập để thanh toán.', 'login' => true], 401);
 
 $in  = json_decode(file_get_contents('php://input'), true) ?: [];
 $get = fn(string $k, int $max) => mb_substr(trim((string)($in[$k] ?? '')), 0, $max);
@@ -32,7 +23,6 @@ $get = fn(string $k, int $max) => mb_substr(trim((string)($in[$k] ?? '')), 0, $m
 $d = [
     'name'     => $get('name', 100),
     'phone'    => preg_replace('/[\s.\-]/', '', $get('phone', 20)),
-    'email'    => $get('email', 150),
     'province' => $get('province', 100),
     'district' => $get('district', 100),
     'ward'     => $get('ward', 100),
@@ -42,28 +32,27 @@ $d = [
 ];
 
 // ---- Kiểm tra dữ liệu ----
-$errors = [];
-if (mb_strlen($d['name']) < 2)                                   $errors['name']     = 'Vui lòng nhập họ và tên.';
-if (!preg_match('/^0\d{9}$/', $d['phone']))                       $errors['phone']    = 'Số điện thoại phải gồm 10 số, bắt đầu bằng 0.';
-if ($d['email'] !== '' && !filter_var($d['email'], FILTER_VALIDATE_EMAIL)) $errors['email'] = 'Email không hợp lệ.';
-if ($d['province'] === '')                                        $errors['province'] = 'Vui lòng chọn Tỉnh/Thành.';
-if ($d['district'] === '')                                        $errors['district'] = 'Vui lòng chọn Quận/Huyện.';
-if ($d['ward'] === '')                                            $errors['ward']     = 'Vui lòng chọn Phường/Xã.';
-if ($d['street'] === '')                                          $errors['street']   = 'Vui lòng nhập số nhà, tên đường.';
-if (!in_array($d['payment'], PAYMENT_METHODS, true))              $errors['payment']  = 'Phương thức thanh toán không hợp lệ.';
-
-if ($errors) {
-    json_out(['ok' => false, 'error' => reset($errors), 'fields' => $errors], 422);
-}
+$rules = [
+    'name'     => [mb_strlen($d['name']) >= 2,                       'Vui lòng nhập họ và tên.'],
+    'phone'    => [preg_match('/^0\d{9}$/', $d['phone']) === 1,      'Số điện thoại phải gồm 10 số, bắt đầu bằng 0.'],
+    'province' => [$d['province'] !== '',                            'Vui lòng chọn Tỉnh/Thành.'],
+    'district' => [$d['district'] !== '',                            'Vui lòng chọn Quận/Huyện.'],
+    'ward'     => [$d['ward'] !== '',                                'Vui lòng chọn Phường/Xã.'],
+    'street'   => [$d['street'] !== '',                              'Vui lòng nhập số nhà, tên đường.'],
+    'payment'  => [in_array($d['payment'], PAYMENT_METHODS, true),   'Phương thức thanh toán không hợp lệ.'],
+];
+$errors = array_map(fn($r) => $r[1], array_filter($rules, fn($r) => !$r[0]));
+if ($errors) json_out(['ok' => false, 'error' => reset($errors), 'fields' => $errors], 422);
 
 // ---- Lưu đơn ----
 try {
     $order = create_order([
+        'user_id' => $user['id'],
         'name'    => $d['name'],
         'phone'   => $d['phone'],
-        'email'   => $d['email'],
+        'email'   => $user['email'],
         'address' => "{$d['street']}, {$d['ward']}, {$d['district']}, {$d['province']}",
-        'note'    => $d['note'],
+        'note'    => $d['note'] !== '' ? $d['note'] : null,
     ], $d['payment']);
 
     json_out(['ok' => true] + $order);

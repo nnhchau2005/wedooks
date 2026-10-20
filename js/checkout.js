@@ -10,7 +10,7 @@ const METHOD_LABEL = { COD: 'Thanh toán khi nhận hàng (COD)', VNPAY: 'VNPAY'
 
 // Tên trường server trả về khi báo lỗi ↔ id ô nhập trên form
 const FIELD_IDS = {
-  name: 'fullname', phone: 'phone', email: 'email', province: 'province',
+  name: 'fullname', phone: 'phone', province: 'province',
   district: 'district', ward: 'ward', street: 'street'
 };
 
@@ -29,20 +29,12 @@ function showError(message, fields = {}) {
   if (first) $(FIELD_IDS[first]).focus();
 }
 
-// Đọc dữ liệu form (KHÔNG gửi giá/tổng tiền – server tự tính lại từ SQL)
+// Đọc dữ liệu form (KHÔNG gửi giá/tổng tiền – server tự tính lại từ SQL; email lấy từ tài khoản)
 function readForm() {
-  const val = (id) => $(id).value.trim();
-  return {
-    name:     val('fullname'),
-    phone:    val('phone'),
-    email:    val('email'),
-    province: $('province').value,
-    district: $('district').value,
-    ward:     $('ward').value,
-    street:   val('street'),
-    note:     val('note'),
-    payment:  document.querySelector('input[name="payment"]:checked').value
-  };
+  const data = { note: $('note').value.trim() };
+  for (const [key, id] of Object.entries(FIELD_IDS)) data[key] = $(id).value.trim();
+  data.payment = document.querySelector('input[name="payment"]:checked').value;
+  return data;
 }
 
 async function submitOrder(e) {
@@ -56,6 +48,13 @@ async function submitOrder(e) {
 
   try {
     const result = await postJson('order_api.php', readForm());
+
+    // Phiên đăng nhập hết hạn → sang trang đăng nhập rồi quay lại
+    if (result.login) {
+      redirecting = true;
+      window.location.href = 'login.php?next=checkout.php';
+      return;
+    }
 
     if (!result.ok) {
       showError(result.error || 'Không đặt được hàng.', result.fields || {});

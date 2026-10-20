@@ -40,15 +40,17 @@ function momo_post(string $url, array $data): array
     return $res;
 }
 
-function momo_sign(string $raw): string
+/** Ký HMAC-SHA256 các trường theo thứ tự a→z: "accessKey=...&amount=...&..." (đúng quy định MoMo). */
+function momo_sign(array $fields): string
 {
+    ksort($fields);
+    $raw = implode('&', array_map(fn($k, $v) => "{$k}={$v}", array_keys($fields), $fields));
     return hash_hmac('sha256', $raw, MOMO_SECRET_KEY);
 }
 
 // ---------- 2. Mã giao dịch gửi MoMo ----------
 // MoMo không nhận trùng orderId (lỗi 41). Mỗi lần bấm thanh toán (kể cả thanh toán lại)
 // dùng mã mới: <mã đơn wedooks>_<thời gian>. Khi MoMo trả về thì cắt lại phần trước dấu _.
-function momo_order_id(string $orderId): string { return $orderId . '_' . time(); }
 function momo_split_order_id(string $momoOrderId): string { return explode('_', $momoOrderId)[0]; }
 
 // ---------- 3. Tạo giao dịch → trả về mảng có payUrl ----------
@@ -59,35 +61,19 @@ function momo_create_payment(string $orderId, int $amount, string $orderInfo): a
         'amount'      => (string)$amount,
         'extraData'   => '',
         'ipnUrl'      => momo_ipn_url(),
-        'orderId'     => momo_order_id($orderId),
+        'orderId'     => $orderId . '_' . time(),
         'orderInfo'   => $orderInfo,
         'partnerCode' => MOMO_PARTNER_CODE,
         'redirectUrl' => momo_redirect_url(),
         'requestId'   => $orderId . '_' . bin2hex(random_bytes(4)),
         'requestType' => MOMO_REQUEST_TYPE,
     ];
+    $body = ['partnerName' => 'wedooks.', 'storeId' => 'WedooksStore', 'lang' => 'vi', 'signature' => momo_sign($p)]
+          + $p;
+    unset($body['accessKey']);
+    $body['amount'] = $amount;
 
-    // Chuỗi ký: các trường xếp theo thứ tự a→z (đúng như code giảng viên)
-    $raw = "accessKey={$p['accessKey']}&amount={$p['amount']}&extraData={$p['extraData']}"
-         . "&ipnUrl={$p['ipnUrl']}&orderId={$p['orderId']}&orderInfo={$p['orderInfo']}"
-         . "&partnerCode={$p['partnerCode']}&redirectUrl={$p['redirectUrl']}"
-         . "&requestId={$p['requestId']}&requestType={$p['requestType']}";
-
-    $res = momo_post(MOMO_ENDPOINT_CREATE, [
-        'partnerCode' => $p['partnerCode'],
-        'partnerName' => 'wedooks.',
-        'storeId'     => 'WedooksStore',
-        'requestId'   => $p['requestId'],
-        'amount'      => $amount,
-        'orderId'     => $p['orderId'],
-        'orderInfo'   => $p['orderInfo'],
-        'redirectUrl' => $p['redirectUrl'],
-        'ipnUrl'      => $p['ipnUrl'],
-        'lang'        => 'vi',
-        'extraData'   => $p['extraData'],
-        'requestType' => $p['requestType'],
-        'signature'   => momo_sign($raw),
-    ]);
+    $res = momo_post(MOMO_ENDPOINT_CREATE, $body);
 
     // Code giảng viên bỏ qua bước này: nếu MoMo báo lỗi thì không có payUrl
     if ((int)($res['resultCode'] ?? -1) !== 0 || empty($res['payUrl'])) {
@@ -101,15 +87,11 @@ function momo_create_payment(string $orderId, int $amount, string $orderInfo): a
 // Dùng chung cho momo_return.php (tham số trên URL) và momo_ipn.php (JSON).
 function momo_signature_ok(array $d): bool
 {
-    $f = fn($k) => (string)($d[$k] ?? '');
-    $raw = 'accessKey=' . MOMO_ACCESS_KEY
-         . '&amount=' . $f('amount') . '&extraData=' . $f('extraData')
-         . '&message=' . $f('message') . '&orderId=' . $f('orderId')
-         . '&orderInfo=' . $f('orderInfo') . '&orderType=' . $f('orderType')
-         . '&partnerCode=' . $f('partnerCode') . '&payType=' . $f('payType')
-         . '&requestId=' . $f('requestId') . '&responseTime=' . $f('responseTime')
-         . '&resultCode=' . $f('resultCode') . '&transId=' . $f('transId');
-    return hash_equals(momo_sign($raw), $f('signature'));
+    $keys = ['amount', 'extraData', 'message', 'orderId', 'orderInfo', 'orderType', 'partnerCode',
+             'payType', 'requestId', 'responseTime', 'resultCode', 'transId'];
+    $fields = ['accessKey' => MOMO_ACCESS_KEY];
+    foreach ($keys as $k) $fields[$k] = (string)($d[$k] ?? '');
+    return hash_equals(momo_sign($fields), (string)($d['signature'] ?? ''));
 }
 
 // ---------- 5. Ghi kết quả vào SQL ----------
@@ -149,16 +131,15 @@ function momo_apply_result(array $d): array
 // ---------- 6. (Tuỳ chọn) Hỏi lại MoMo trạng thái 1 giao dịch ----------
 function momo_query(string $momoOrderId): array
 {
-    $requestId = 'Q' . time() . bin2hex(random_bytes(3));
-    $raw = 'accessKey=' . MOMO_ACCESS_KEY . "&orderId={$momoOrderId}"
-         . '&partnerCode=' . MOMO_PARTNER_CODE . "&requestId={$requestId}";
-    return momo_post(MOMO_ENDPOINT_QUERY, [
-        'partnerCode' => MOMO_PARTNER_CODE,
-        'requestId'   => $requestId,
+    $p = [
+        'accessKey'   => MOMO_ACCESS_KEY,
         'orderId'     => $momoOrderId,
-        'lang'        => 'vi',
-        'signature'   => momo_sign($raw),
-    ]);
+        'partnerCode' => MOMO_PARTNER_CODE,
+        'requestId'   => 'Q' . time() . bin2hex(random_bytes(3)),
+    ];
+    $body = $p + ['lang' => 'vi', 'signature' => momo_sign($p)];
+    unset($body['accessKey']);
+    return momo_post(MOMO_ENDPOINT_QUERY, $body);
 }
 
 // ---------- 7. Khung trang HTML (giao diện nằm trong style.css) ----------
@@ -176,7 +157,7 @@ function momo_page(string $state, string $title, string $text, array $rows = [],
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title><?= e($title) ?> - wedooks.</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
   <header class="site-header site-header--plain">

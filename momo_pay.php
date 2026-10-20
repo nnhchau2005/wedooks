@@ -9,14 +9,15 @@
 require __DIR__ . '/momo.php';
 
 $orderId = (string)($_GET['order_id'] ?? '');
+$user    = require_login('momo_pay.php?order_id=' . urlencode($orderId));
 
 try {
     if (!preg_match('/^WDK\d{12}$/', $orderId)) {
         throw new InvalidArgumentException('Mã đơn hàng không hợp lệ.');
     }
     $order = get_order($orderId);
-    if (!$order) {
-        throw new InvalidArgumentException('Không tìm thấy đơn hàng.');
+    if (!$order || (int)$order['UserID'] !== $user['id']) {
+        throw new InvalidArgumentException('Không tìm thấy đơn hàng trong tài khoản của bạn.');
     }
     if ($order['PaymentMethod'] !== 'MOMO') {
         throw new InvalidArgumentException('Đơn này không chọn thanh toán bằng MoMo.');

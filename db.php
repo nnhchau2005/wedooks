@@ -1,7 +1,7 @@
 <?php
 /**
- * db.php – Kết nối CSDL + các hàm Sản phẩm / Giỏ hàng.
- * MỌI câu SQL nằm ở file này. index.php, cart.php, cart_api.php đều require nó.
+ * db.php – Kết nối CSDL + các hàm Sản phẩm / Giỏ hàng / Đơn hàng / Tài khoản.
+ * MỌI câu SQL nằm ở file này. Mọi trang PHP đều require nó.
  *
  * Giỏ hàng lưu trong bảng CartItems, nhận diện khách bằng cookie "wedooks_cart"
  * (chuỗi ngẫu nhiên 32 ký tự, sống 30 ngày) → tắt trình duyệt mở lại vẫn còn giỏ.
@@ -45,6 +45,32 @@ function money($n): string
     return number_format((float)$n, 0, ',', '.') . ' đ';
 }
 
+/** Trả JSON rồi dừng (dùng cho cart_api.php, order_api.php). */
+function json_out(array $data, int $status = 200): void
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** Chỉ nhận request gửi từ js/common.js (header tự đặt → chống CSRF đơn giản). */
+function require_fetch(): void
+{
+    if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'fetch') {
+        json_out(['ok' => false, 'error' => 'Yêu cầu không hợp lệ.'], 403);
+    }
+}
+
+/** Ghi log lỗi và trả về câu thông báo thân thiện để in ra trang. */
+function page_error(Throwable $ex, string $tag, string $what = 'dữ liệu'): string
+{
+    error_log("[{$tag}] " . $ex->getMessage());
+    return $ex instanceof ProductColumnsException
+        ? $ex->getMessage()
+        : "Không tải được {$what} từ cơ sở dữ liệu. Kiểm tra lại kết nối SQL.";
+}
+
 date_default_timezone_set('Asia/Ho_Chi_Minh');
 
 // Phí ship: 30.000đ, miễn phí cho đơn từ 1.000.000đ (theo thanh thông báo ở trang chủ)
@@ -81,6 +107,9 @@ function cart_token(): string
 
 // Gọi ngay khi require để cookie được gửi TRƯỚC khi in HTML.
 cart_token();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start(['cookie_httponly' => true, 'cookie_samesite' => 'Lax']);
+}
 
 // ===================== 4. SẢN PHẨM =====================
 /*
@@ -212,22 +241,14 @@ function cart_add(int $productId, string $size = 'M', int $qty = 1): string
     return $product['name'];
 }
 
-/** Tăng/giảm số lượng 1 dòng giỏ. Về 0 thì xoá dòng. */
+/** Tăng/giảm số lượng 1 dòng giỏ (tối đa CART_MAX_QTY). Về 0 thì xoá dòng. */
 function cart_change(int $cartItemId, int $delta): void
 {
-    $st = db()->prepare('SELECT Quantity FROM CartItems WHERE CartItemID = :id AND CartToken = :t');
-    $st->execute([':id' => $cartItemId, ':t' => cart_token()]);
-    $row = $st->fetch(PDO::FETCH_ASSOC);
-    if (!$row) return;
-
-    $newQty = (int)$row['Quantity'] + $delta;
-    if ($newQty <= 0) {
-        cart_remove($cartItemId);
-        return;
-    }
-    db()->prepare('UPDATE CartItems SET Quantity = :q, UpdatedAt = CURRENT_TIMESTAMP
-                   WHERE CartItemID = :id AND CartToken = :t')
-        ->execute([':q' => min($newQty, CART_MAX_QTY), ':id' => $cartItemId, ':t' => cart_token()]);
+    $st = db()->prepare('UPDATE CartItems SET Quantity = Quantity + :d, UpdatedAt = CURRENT_TIMESTAMP
+                         WHERE CartItemID = :id AND CartToken = :t
+                           AND Quantity + :d2 BETWEEN 1 AND ' . CART_MAX_QTY);
+    $st->execute([':d' => $delta, ':d2' => $delta, ':id' => $cartItemId, ':t' => cart_token()]);
+    if ($st->rowCount() === 0 && $delta < 0) cart_remove($cartItemId);
 }
 
 function cart_remove(int $cartItemId): void
@@ -275,13 +296,7 @@ function cart_summary(): array
         $items[] = $item;
     }
     $shipping = shipping_fee($subtotal);
-    return [
-        'items'    => $items,
-        'count'    => $count,
-        'subtotal' => $subtotal,
-        'shipping' => $shipping,
-        'total'    => $subtotal + $shipping,
-    ];
+    return compact('items', 'count', 'subtotal', 'shipping') + ['total' => $subtotal + $shipping];
 }
 
 // ===================== 6. ĐƠN HÀNG =====================
@@ -302,7 +317,7 @@ function new_order_id(): string
  * Tạo đơn từ giỏ hiện tại (trong 1 transaction):
  *   INSERT Orders → INSERT OrderItems → DELETE CartItems.
  * Lỗi giữa chừng thì rollBack, không có đơn "nửa vời", giỏ vẫn còn.
- * $c: name, phone, email, address, note  (đã kiểm tra ở order_api.php)
+ * $c: user_id, name, phone, email, address, note  (đã kiểm tra ở order_api.php)
  */
 function create_order(array $c, string $method): array
 {
@@ -317,17 +332,18 @@ function create_order(array $c, string $method): array
         $orderId = new_order_id();
 
         $pdo->prepare('INSERT INTO Orders
-                (OrderID, CustomerName, Phone, Email, Address, Note,
+                (OrderID, UserID, CustomerName, Phone, Email, Address, Note,
                  Subtotal, ShippingFee, TotalAmount, PaymentMethod, PaymentStatus)
-             VALUES (:id, :name, :phone, :email, :address, :note,
+             VALUES (:id, :uid, :name, :phone, :email, :address, :note,
                      :subtotal, :shipping, :total, :method, :status)')
             ->execute([
                 ':id'       => $orderId,
+                ':uid'      => $c['user_id'],
                 ':name'     => $c['name'],
                 ':phone'    => $c['phone'],
-                ':email'    => $c['email'] !== '' ? $c['email'] : null,
+                ':email'    => $c['email'],
                 ':address'  => $c['address'],
-                ':note'     => $c['note'] !== '' ? $c['note'] : null,
+                ':note'     => $c['note'],
                 ':subtotal' => $cart['subtotal'],
                 ':shipping' => $cart['shipping'],
                 ':total'    => $cart['total'],
@@ -400,4 +416,82 @@ function mark_order_failed(string $orderId, string $note = ''): bool
                          WHERE OrderID = :id AND PaymentStatus <> 'PAID'");
     $st->execute([':n' => mb_substr($note, 0, 255), ':id' => $orderId]);
     return $st->rowCount() > 0;
+}
+
+// ===================== 8. TÀI KHOẢN (đăng nhập bằng email) =====================
+// Cần chạy user_schema.sql trước (tạo bảng Users + thêm cột UserID vào Orders).
+// Đăng nhập lưu trong $_SESSION['user'] = ['id', 'email', 'name'].
+
+/** Người đang đăng nhập (null nếu chưa). */
+function current_user(): ?array
+{
+    return $_SESSION['user'] ?? null;
+}
+
+/** Trang bắt buộc đăng nhập: chưa đăng nhập thì chuyển sang login.php rồi quay lại $back. */
+function require_login(string $back): array
+{
+    $u = current_user();
+    if (!$u) {
+        header('Location: login.php?next=' . urlencode($back));
+        exit;
+    }
+    return $u;
+}
+
+/** Chỉ cho quay về trang nội bộ dạng "xxx.php?a=b" (chống chuyển hướng sang web lạ). */
+function safe_next(?string $next): string
+{
+    return preg_match('/^[a-z_]+\.php(\?[\w=&%.-]*)?$/', (string)$next) ? $next : 'index.php';
+}
+
+function login_session(array $row): void
+{
+    session_regenerate_id(true);   // chống chiếm phiên (session fixation)
+    $_SESSION['user'] = [
+        'id'    => (int)$row['UserID'],
+        'email' => (string)$row['Email'],
+        'name'  => (string)$row['FullName'],
+    ];
+}
+
+/** Đăng ký tài khoản mới rồi đăng nhập luôn. */
+function user_register(string $email, string $password, string $name): void
+{
+    $email = strtolower(trim($email));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('Email không hợp lệ.');
+    if (mb_strlen($name) < 2)                       throw new InvalidArgumentException('Vui lòng nhập họ và tên.');
+    if (strlen($password) < 6)                      throw new InvalidArgumentException('Mật khẩu phải có ít nhất 6 ký tự.');
+
+    $st = db()->prepare('SELECT COUNT(*) FROM Users WHERE Email = :e');
+    $st->execute([':e' => $email]);
+    if ((int)$st->fetchColumn() > 0) throw new InvalidArgumentException('Email này đã được đăng ký.');
+
+    db()->prepare('INSERT INTO Users (Email, PasswordHash, FullName) VALUES (:e, :h, :n)')
+        ->execute([':e' => $email, ':h' => password_hash($password, PASSWORD_DEFAULT), ':n' => $name]);
+    user_login($email, $password);
+}
+
+/** Đăng nhập bằng email + mật khẩu. */
+function user_login(string $email, string $password): void
+{
+    $st = db()->prepare('SELECT UserID, Email, FullName, PasswordHash FROM Users WHERE Email = :e');
+    $st->execute([':e' => strtolower(trim($email))]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$row || !password_verify($password, $row['PasswordHash'])) {
+        throw new InvalidArgumentException('Email hoặc mật khẩu không đúng.');
+    }
+    login_session($row);
+}
+
+function user_logout(): void
+{
+    unset($_SESSION['user']);
+    session_regenerate_id(true);
+}
+
+/** Mã chống CSRF cho form POST thường (login.php). */
+function csrf_token(): string
+{
+    return $_SESSION['csrf'] ??= bin2hex(random_bytes(16));
 }

@@ -5,19 +5,21 @@
  * PHP đọc giỏ từ SQL (CartItems JOIN Products) và in sẵn ra trang:
  *   - giỏ trống  → chuyển về cart.php ngay, không cần đợi JavaScript
  *   - tổng tiền, phí ship do server tính (cart_summary trong db.php)
+ *   - chưa đăng nhập → chuyển sang login.php, đăng nhập xong quay lại đây
  * JavaScript chỉ còn lo gửi form → order_api.php, rồi:
  *   - COD / VNPAY : hiện màn hình "Đặt hàng thành công"
  *   - MOMO        : chuyển sang momo_pay.php?order_id=...
  */
 require __DIR__ . '/db.php';
 
+$user = require_login('checkout.php');   // bắt buộc đăng nhập bằng email mới được thanh toán
+
 $dbError = null;
 $cart = ['items' => [], 'count' => 0, 'subtotal' => 0, 'shipping' => 0, 'total' => 0];
 try {
     $cart = cart_summary();
 } catch (Throwable $ex) {
-    error_log('[checkout] ' . $ex->getMessage());
-    $dbError = $ex instanceof ProductColumnsException ? $ex->getMessage() : 'Không tải được giỏ hàng từ cơ sở dữ liệu. Kiểm tra lại kết nối SQL.';
+    $dbError = page_error($ex, 'checkout', 'giỏ hàng');
 }
 
 // Giỏ trống → quay lại trang giỏ hàng
@@ -58,7 +60,9 @@ $methods = [
         <span class="back-link__text--tablet-up">Giỏ hàng</span>
       </a>
       <a href="index.php" class="logo">wedooks.</a>
-      <div class="header-spacer"></div>
+      <div class="header-side header-side--right">
+        <?php include __DIR__ . '/account_link.php'; ?>
+      </div>
     </div>
   </header>
 
@@ -136,15 +140,15 @@ $methods = [
             <div class="form-grid form-grid--2">
               <div class="field--full">
                 <label class="field__label" for="fullname">Họ và tên *</label>
-                <input type="text" id="fullname" required maxlength="100" placeholder="Nhập họ và tên của bạn" class="field__input">
+                <input type="text" id="fullname" required maxlength="100" placeholder="Nhập họ và tên của bạn" class="field__input" value="<?= e($user['name']) ?>">
               </div>
               <div>
                 <label class="field__label" for="phone">Số điện thoại *</label>
                 <input type="tel" id="phone" required maxlength="15" placeholder="0901234567" class="field__input">
               </div>
               <div>
-                <label class="field__label" for="email">Email (Không bắt buộc)</label>
-                <input type="email" id="email" maxlength="150" placeholder="email@example.com" class="field__input">
+                <label class="field__label" for="email">Email (tài khoản đăng nhập)</label>
+                <input type="email" id="email" class="field__input" value="<?= e($user['email']) ?>" readonly>
               </div>
             </div>
           </div>

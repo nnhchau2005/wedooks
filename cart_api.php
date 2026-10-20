@@ -11,42 +11,21 @@
  */
 require __DIR__ . '/db.php';
 
-header('Content-Type: application/json; charset=utf-8');
-
-function json_out(array $data, int $status = 200): void
-{
-    http_response_code($status);
-    echo json_encode($data, JSON_UNESCAPED_UNICODE);
-    exit;
-}
-
 try {
     $extra = [];
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        // Header tự đặt → trang web lạ không gửi request giả được (chống CSRF đơn giản)
-        if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'fetch') {
-            json_out(['ok' => false, 'error' => 'Yêu cầu không hợp lệ.'], 403);
-        }
-
+        require_fetch();
         $in = json_decode(file_get_contents('php://input'), true) ?: [];
+        $id = (int)($in['cart_id'] ?? 0);
 
         switch ($in['action'] ?? '') {
             case 'add':
-                $extra['added'] = cart_add(
-                    (int)($in['product_id'] ?? 0),
-                    (string)($in['size'] ?? 'M'),
-                    (int)($in['quantity'] ?? 1)
-                );
+                $extra['added'] = cart_add((int)($in['product_id'] ?? 0), (string)($in['size'] ?? 'M'), (int)($in['quantity'] ?? 1));
                 break;
-            case 'update':
-                cart_change((int)($in['cart_id'] ?? 0), (int)($in['delta'] ?? 0));
-                break;
-            case 'remove':
-                cart_remove((int)($in['cart_id'] ?? 0));
-                break;
-            default:
-                throw new InvalidArgumentException('Hành động không hợp lệ.');
+            case 'update': cart_change($id, (int)($in['delta'] ?? 0)); break;
+            case 'remove': cart_remove($id); break;
+            default: throw new InvalidArgumentException('Hành động không hợp lệ.');
         }
     }
 

@@ -6,8 +6,7 @@ $cart = ['items' => [], 'count' => 0, 'subtotal' => 0];
 try {
     $cart = cart_summary();   // CartItems JOIN Products – giá lấy từ SQL
 } catch (Throwable $ex) {
-    error_log('[cart] ' . $ex->getMessage());
-    $dbError = $ex instanceof ProductColumnsException ? $ex->getMessage() : 'Không tải được giỏ hàng từ cơ sở dữ liệu. Kiểm tra lại kết nối SQL.';
+    $dbError = page_error($ex, 'cart', 'giỏ hàng');
 }
 ?>
 <!doctype html>
@@ -33,6 +32,7 @@ try {
       </div>
       <a href="index.php" class="logo">wedooks.</a>
       <div class="header-side header-side--right">
+        <?php include __DIR__ . '/account_link.php'; ?>
         <a href="cart.php" class="cart-link cart-link--active" title="Giỏ hàng">
           <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 12c.07.665-.45 1.243-1.119 1.243H4.25a1.125 1.125 0 01-1.12-1.243l1.264-12A1.125 1.125 0 015.513 7.5h12.974c.576 0 1.059.435 1.119.993z"/></svg>
           <span id="cart-badge" class="cart-badge"><?= (int)$cart['count'] ?></span>
@@ -88,6 +88,9 @@ try {
         </div>
 
         <a href="checkout.php" class="btn btn--dark btn--block btn--shadow">Tiến hành thanh toán</a>
+        <?php if (!current_user()): ?>
+          <p class="summary__login-note">Bạn cần <a href="login.php?next=checkout.php">đăng nhập bằng email</a> để thanh toán.</p>
+        <?php endif; ?>
 
         <div class="secure-note">
           <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>

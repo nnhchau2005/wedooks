@@ -828,3 +828,11 @@ textarea.field__input { resize: vertical; }
 .result__note { margin-bottom: 32px; color: var(--gray-500); font-size: 12px; }
 .result__actions { display: flex; flex-direction: column; justify-content: center; gap: 12px; }
 @media (min-width: 640px) { .result__actions { flex-direction: row; } }
+
+/* ---------- 14. ĐĂNG NHẬP / TÀI KHOẢN ---------- */
+.auth { max-width: 420px; margin: 0 auto; padding: 64px 16px; text-align: center; }
+.auth form { text-align: left; }
+.account-link { color: var(--gray-500); font-size: 12px; white-space: nowrap; }
+.account-link a { color: var(--black); text-decoration: underline; }
+.summary__login-note { margin-top: 12px; color: var(--gray-500); font-size: 12px; text-align: center; }
+.summary__login-note a { color: var(--black); text-decoration: underline; }
